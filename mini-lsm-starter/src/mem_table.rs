@@ -20,7 +20,7 @@ use crate::wal::Wal;
 /// An initial implementation of memtable is part of week 1, day 1. It will be incrementally implemented in other
 /// chapters of week 1 and week 2.
 pub struct MemTable {
-    map: Arc<SkipMap<Bytes, Bytes>>,
+    pub map: Arc<SkipMap<Bytes, Bytes>>,
     wal: Option<Wal>,
     id: usize,
     approximate_size: Arc<AtomicUsize>,
@@ -106,9 +106,30 @@ impl MemTable {
         Ok(())
     }
 
+    fn owned_bytes_range(b: Bound<&[u8]>) -> Bound<Bytes> {
+        match b {
+            Bound::Included(x) => Bound::Included(Bytes::copy_from_slice(x)),
+            Bound::Excluded(x) => Bound::Excluded(Bytes::copy_from_slice(x)),
+            Bound::Unbounded => Bound::Unbounded,
+        }
+    }
+
     /// Get an iterator over a range of keys.
-    pub fn scan(&self, _lower: Bound<&[u8]>, _upper: Bound<&[u8]>) -> MemTableIterator {
-        unimplemented!()
+    pub fn scan(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> MemTableIterator {
+        let (lower, upper) = (
+            Self::owned_bytes_range(lower),
+            Self::owned_bytes_range(upper),
+        );
+        let mut iter = MemTableIteratorBuilder {
+            map: self.map.clone(),
+            iter_builder: |map| {
+                map.range((lower, upper))
+            },
+            item: None,
+        }
+        .build();
+        _ = iter.next();
+        iter
     }
 
     /// Flush the mem-table to SSTable. Implement in week 1 day 6.
@@ -147,25 +168,36 @@ pub struct MemTableIterator {
     #[not_covariant]
     iter: SkipMapRangeIter<'this>,
     /// Stores the current key-value pair.
-    item: (Bytes, Bytes),
+    item: Option<(Bytes, Bytes)>,
 }
 
 impl StorageIterator for MemTableIterator {
     type KeyType<'a> = KeySlice<'a>;
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        &self.borrow_item().as_ref().expect("iterator consumed").1
     }
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        let key_bytes_ref = &self.borrow_item().as_ref().expect("iterator consumed").0;
+        KeySlice::from_slice(key_bytes_ref)
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.borrow_item().is_some()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let next_item = self.with_iter_mut(|iter| {
+            let item_maybe = iter.next();
+            item_maybe.map(
+                |item| (item.key().clone(), item.value().clone())
+            )
+        });
+
+        self.with_mut(|this| {
+            *this.item = next_item;
+        });
+        Ok(())
     }
 }

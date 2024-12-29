@@ -1,12 +1,11 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::cmp::{self};
 use std::collections::BinaryHeap;
 
 use anyhow::Result;
 
-use crate::key::KeySlice;
+use crate::key::{Key, KeySlice};
 
 use super::StorageIterator;
 
@@ -32,6 +31,7 @@ impl<I: StorageIterator> Ord for HeapWrapper<I> {
             .key()
             .cmp(&other.1.key())
             .then(self.0.cmp(&other.0))
+            // THIS MAKES THE HEAP A MIN HEAP!!!
             .reverse()
     }
 }
@@ -45,7 +45,21 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        let mut heap = BinaryHeap::new();
+    
+        // Push all valid iterators into the heap
+        for (i, iter) in iters.into_iter().enumerate() {
+            if iter.is_valid() {
+                heap.push(HeapWrapper(i, iter));
+            }
+        }
+        
+        // Pop the smallest key to become our current
+        let current = heap.pop();
+        Self {
+            iters: heap,
+            current,
+        }
     }
 }
 
@@ -55,18 +69,42 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        self.current.as_ref().expect("invalid iterator").1.key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.current.as_ref().expect("invalid iterator").1.value()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.current.is_some()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let mut prev_current = self.current.take().expect("invalid iterator");
+        let prev_key = prev_current.1.key().into_inner().to_vec();
+        
+        // consume `current` which we already returned,
+        // and then push the iterator back into the heap
+        prev_current.1.next()?;
+        if prev_current.1.is_valid() {
+            self.iters.push(prev_current);
+        }
+        while let Some(mut iter) = self.iters.pop() {
+            if iter.1.key() == Key::from_slice(&prev_key) {
+                // we just returned this key, skip it
+                // as we returned the more recent value
+                // from the memtable with the smaller idx
+                iter.1.next()?;
+                if iter.1.is_valid() {
+                    self.iters.push(iter);
+                }
+                continue;
+            } else {
+                self.current = Some(iter);
+                break;
+            }
+        }
+        Ok(())
     }
 }
