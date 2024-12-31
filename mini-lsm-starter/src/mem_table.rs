@@ -122,9 +122,7 @@ impl MemTable {
         );
         let mut iter = MemTableIteratorBuilder {
             map: self.map.clone(),
-            iter_builder: |map| {
-                map.range((lower, upper))
-            },
+            iter_builder: |map| map.range((lower, upper)),
             item: None,
         }
         .build();
@@ -190,9 +188,7 @@ impl StorageIterator for MemTableIterator {
     fn next(&mut self) -> Result<()> {
         let next_item = self.with_iter_mut(|iter| {
             let item_maybe = iter.next();
-            item_maybe.map(
-                |item| (item.key().clone(), item.value().clone())
-            )
+            item_maybe.map(|item| (item.key().clone(), item.value().clone()))
         });
 
         self.with_mut(|this| {

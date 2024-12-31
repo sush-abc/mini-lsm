@@ -17,9 +17,7 @@ pub struct LsmIterator {
 
 impl LsmIterator {
     pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
-        let mut iter = Self {
-            inner: iter,
-        };
+        let mut iter = Self { inner: iter };
         iter.move_to_non_delete()?;
         Ok(iter)
     }
@@ -53,11 +51,11 @@ impl StorageIterator for LsmIterator {
             if !self.inner.is_valid() {
                 break;
             }
-            if !self.inner.value().is_empty(){
+            if !self.inner.value().is_empty() {
                 // this key was deleted, don't return it in the iterator
                 break;
             }
-        };
+        }
         Ok(())
     }
 }

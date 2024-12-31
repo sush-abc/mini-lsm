@@ -46,14 +46,14 @@ pub struct MergeIterator<I: StorageIterator> {
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
         let mut heap = BinaryHeap::new();
-    
+
         // Push all valid iterators into the heap
         for (i, iter) in iters.into_iter().enumerate() {
             if iter.is_valid() {
                 heap.push(HeapWrapper(i, iter));
             }
         }
-        
+
         // Pop the smallest key to become our current
         let current = heap.pop();
         Self {
@@ -83,7 +83,7 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     fn next(&mut self) -> Result<()> {
         let mut prev_current = self.current.take().expect("invalid iterator");
         let prev_key = prev_current.1.key().into_inner().to_vec();
-        
+
         // consume `current` which we already returned,
         // and then push the iterator back into the heap
         prev_current.1.next()?;

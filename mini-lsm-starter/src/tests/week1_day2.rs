@@ -120,9 +120,7 @@ fn test_task2_merge_1() {
         ],
     );
 
-
     let mut iter = MergeIterator::create(vec![Box::new(i3), Box::new(i1), Box::new(i2)]);
-    
 
     check_iter_result_by_key(
         &mut iter,
@@ -271,7 +269,6 @@ fn test_task4_integration() {
     let storage = Arc::new(
         LsmStorageInner::open(dir.path(), LsmStorageOptions::default_for_week1_test()).unwrap(),
     );
-
 
     storage.put(b"1", b"233").unwrap();
     storage.put(b"2", b"2333").unwrap();
