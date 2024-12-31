@@ -92,4 +92,8 @@ impl BlockBuilder {
             offsets: self.offsets,
         }
     }
+
+    pub fn estimated_size(&self) -> usize {
+        self.data.len()
+    }
 }

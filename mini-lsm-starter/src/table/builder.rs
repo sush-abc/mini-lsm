@@ -10,6 +10,7 @@ use super::{BlockMeta, SsTable};
 use crate::{block::BlockBuilder, key::KeySlice, lsm_storage::BlockCache};
 
 /// Builds an SSTable from key-value pairs.
+#[derive(Default)]
 pub struct SsTableBuilder {
     builder: BlockBuilder,
     first_key: Vec<u8>,
@@ -22,7 +23,11 @@ pub struct SsTableBuilder {
 impl SsTableBuilder {
     /// Create a builder based on target block size.
     pub fn new(block_size: usize) -> Self {
-        unimplemented!()
+        Self {
+            block_size,
+            builder: BlockBuilder::new(block_size),
+            ..Default::default()
+        }
     }
 
     /// Adds a key-value pair to SSTable.
@@ -30,6 +35,17 @@ impl SsTableBuilder {
     /// Note: You should split a new block when the current block is full.(`std::mem::replace` may
     /// be helpful here)
     pub fn add(&mut self, key: KeySlice, value: &[u8]) {
+        if !self.builder.add(key, value) {
+            self.freeze_and_create_new_builder();
+            assert!(self.builder.add(key, value), "empty block must accept the first key");
+        }
+        if self.first_key.is_empty() {
+            self.first_key = key.to_key_vec().into_inner();
+        }
+        self.last_key = key.to_key_vec().into_inner();
+    }
+
+    fn freeze_and_create_new_builder(&mut self) {
         unimplemented!()
     }
 
@@ -38,7 +54,7 @@ impl SsTableBuilder {
     /// Since the data blocks contain much more data than meta blocks, just return the size of data
     /// blocks here.
     pub fn estimated_size(&self) -> usize {
-        unimplemented!()
+        self.data.len() + self.builder.estimated_size()
     }
 
     /// Builds the SSTable and writes it to the given path. Use the `FileObject` structure to manipulate the disk objects.
