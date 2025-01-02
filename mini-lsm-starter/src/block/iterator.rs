@@ -115,7 +115,6 @@ impl BlockIterator {
     /// Note: You should assume the key-value pairs in the block are sorted when being added by
     /// callers.
     pub fn seek_to_key(&mut self, target: KeySlice) {
-
         fn binary_function(key: &[u8], target: &[u8]) -> bool {
             key >= target
         }
@@ -124,7 +123,7 @@ impl BlockIterator {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             self.seek_to_idx(mid);
-            if ! binary_function(self.key.raw_ref(), target.raw_ref()) {
+            if !binary_function(self.key.raw_ref(), target.raw_ref()) {
                 lo = mid + 1;
             } else {
                 hi = mid;

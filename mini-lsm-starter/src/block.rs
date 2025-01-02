@@ -40,30 +40,25 @@ impl Block {
 
     /// Decode from the data layout, transform the input `data` to a single `Block`
     pub fn decode(buf: &[u8]) -> Self {
-        // 1) Last 2 bytes → number of elements
         let num_elements = u16::from_le_bytes([buf[buf.len() - 2], buf[buf.len() - 1]]) as usize;
 
-        // 2) The offset section sits right before those 2 bytes
-        //    and is 2 bytes per offset entry.
         let offset_section_start = buf.len() - 2 - 2 * num_elements;
         let offset_section_end = buf.len() - 2; // exclude trailer
 
-        // 3) Everything before offset_section_start is the "data section."
-        let data_section = &buf[..offset_section_start];
+        let data = &buf[..offset_section_start];
 
         // 4) Parse offsets in the same order they were written
         let offset_slice = &buf[offset_section_start..offset_section_end];
         let mut offsets = Vec::with_capacity(num_elements);
         for i in 0..num_elements {
             let start = i * 2;
-            let end = start + 2;
             let offset = u16::from_le_bytes([offset_slice[start], offset_slice[start + 1]]);
             offsets.push(offset);
         }
 
         // 5) Put everything into a Block
         Self {
-            data: data_section.to_vec(), // store data section as Vec<u8>
+            data: data.to_vec(),
             offsets,
         }
     }
