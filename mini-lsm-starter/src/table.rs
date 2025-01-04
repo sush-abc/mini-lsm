@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::block::Block;
-use crate::key::{KeyBytes, KeySlice};
+use crate::key::KeyBytes;
 use crate::lsm_storage::BlockCache;
 
 use self::bloom::Bloom;
