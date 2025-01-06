@@ -23,7 +23,7 @@ use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SsTable, SsTableIterator};
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -383,7 +383,46 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        unimplemented!()
+        let _state_lock = self.state_lock.lock();
+
+        // don't perform expensive io while blocking put/get/scan
+        let oldest_imm_memtable = {
+            let state = self.state.read();
+            let Some(oldest) = state.imm_memtables.last() else {
+                return Ok(());
+            };
+            Arc::clone(&oldest)
+        };
+
+        // the expensive io
+        let sst = {
+            let mut builder = SsTableBuilder::new(self.options.block_size);
+            oldest_imm_memtable.flush(&mut builder)?;
+            let sst = builder.build(
+                oldest_imm_memtable.id(),
+                Some(Arc::clone(&self.block_cache)),
+                self.path_of_sst(oldest_imm_memtable.id()),
+            )?;
+            Arc::new(sst)
+        };
+
+        let mut guard = self.state.write();
+        let mut snapshot = guard.as_ref().clone();
+
+        let sst_id = sst.sst_id();
+
+        // Remove the memtable from the immutable memtables.
+        let mem = snapshot.imm_memtables.pop().unwrap();
+        assert_eq!(mem.id(), sst_id);
+
+        // Add L0 table
+        snapshot.l0_sstables.insert(0, sst_id);
+        snapshot.sstables.insert(sst_id, sst);
+
+        // Update the snapshot.
+        *guard = Arc::new(snapshot);
+
+        Ok(())
     }
 
     pub fn new_txn(&self) -> Result<()> {
@@ -415,6 +454,15 @@ impl LsmStorageInner {
             let sst_iters = snapshot
                 .l0_sstables
                 .iter()
+                .filter(|sst_id| {
+                    let sst = snapshot.sstables.get(sst_id).unwrap();
+                    range_overlap(
+                        lower,
+                        upper,
+                        sst.first_key().raw_ref(),
+                        sst.last_key().raw_ref(),
+                    )
+                })
                 .map(|sst_id| {
                     let sst = snapshot.sstables.get(sst_id).unwrap();
                     match lower {
@@ -451,4 +499,31 @@ impl LsmStorageInner {
             },
         )?))
     }
+}
+
+fn range_overlap(
+    user_begin: Bound<&[u8]>,
+    user_end: Bound<&[u8]>,
+    table_begin: &[u8],
+    table_end: &[u8],
+) -> bool {
+    match user_end {
+        Bound::Excluded(key) if key <= table_begin => {
+            return false;
+        }
+        Bound::Included(key) if key < table_begin => {
+            return false;
+        }
+        _ => {}
+    }
+    match user_begin {
+        Bound::Excluded(key) if key >= table_end => {
+            return false;
+        }
+        Bound::Included(key) if key > table_end => {
+            return false;
+        }
+        _ => {}
+    }
+    true
 }

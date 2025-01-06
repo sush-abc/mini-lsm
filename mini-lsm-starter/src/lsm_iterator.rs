@@ -7,8 +7,11 @@ use anyhow::{bail, Result};
 use bytes::Bytes;
 
 use crate::{
-    iterators::{merge_iterator::MergeIterator, two_merge_iterator::TwoMergeIterator, StorageIterator},
-    mem_table::MemTableIterator, table::SsTableIterator,
+    iterators::{
+        merge_iterator::MergeIterator, two_merge_iterator::TwoMergeIterator, StorageIterator,
+    },
+    mem_table::MemTableIterator,
+    table::SsTableIterator,
 };
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the tutorial for multiple times.
@@ -74,6 +77,10 @@ impl StorageIterator for LsmIterator {
         self.move_to_non_delete()?;
         Ok(())
     }
+
+    fn num_active_iterators(&self) -> usize {
+        self.inner.num_active_iterators()
+    }
 }
 
 /// A wrapper around existing iterator, will prevent users from calling `next` when the iterator is
@@ -126,5 +133,9 @@ impl<I: StorageIterator> StorageIterator for FusedIterator<I> {
                 Err(e)
             }
         }
+    }
+
+    fn num_active_iterators(&self) -> usize {
+        self.iter.num_active_iterators()
     }
 }
