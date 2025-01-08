@@ -37,9 +37,27 @@ impl BlockIterator {
         if block.offsets.is_empty() {
             return KeyVec::new();
         }
-        // first two bytes contain the len fo the first key
-        let key_len = u16::from_le_bytes([block.data[0], block.data[1]]) as usize;
-        KeyVec::from_vec(block.data[2..2 + key_len].to_vec())
+
+        /*
+        ----------------------------------------------------------------------------------------------------
+        |             Data Section             |              Offset Section             |      Extra      |
+        ----------------------------------------------------------------------------------------------------
+        | Entry #1 | Entry #2 | ... | Entry #N | Offset #1 | Offset #2 | ... | Offset #N | num_of_elements |
+        ----------------------------------------------------------------------------------------------------
+
+        ----------------------------------------------------------------------------------------------------------------
+        |                           Entry #1                                                                     | ... |
+        ----------------------------------------------------------------------------------------------------------------
+        | key_overlap_len (u16) | rest_key_len (u16) | key (rest_key_len)  | value_len (2B) | value (varlen)     | ... |
+        ----------------------------------------------------------------------------------------------------------------
+         */
+
+        // first two bytes will contain zero, a sanity check
+        assert_eq!(block.data[0], 0);
+        assert_eq!(block.data[1], 0);
+
+        let key_len = u16::from_le_bytes([block.data[2], block.data[3]]) as usize;
+        KeyVec::from_vec(block.data[4..4 + key_len].to_vec())
     }
 
     /// Creates a block iterator and seek to the first entry.
@@ -81,16 +99,40 @@ impl BlockIterator {
             return;
         }
         let entry_start = self.block.offsets[idx] as usize;
+
+        /*
+        ----------------------------------------------------------------------------------------------------
+        |             Data Section             |              Offset Section             |      Extra      |
+        ----------------------------------------------------------------------------------------------------
+        | Entry #1 | Entry #2 | ... | Entry #N | Offset #1 | Offset #2 | ... | Offset #N | num_of_elements |
+        ----------------------------------------------------------------------------------------------------
+
+        ----------------------------------------------------------------------------------------------------------------
+        |                           Entry #1                                                                     | ... |
+        ----------------------------------------------------------------------------------------------------------------
+        | key_overlap_len (u16) | rest_key_len (u16) | key (rest_key_len)  | value_len (2B) | value (varlen)     | ... |
+        ----------------------------------------------------------------------------------------------------------------
+         */
+
         // extract key
-        let key_len = u16::from_le_bytes([
+        let key_overlap_len = u16::from_le_bytes([
             self.block.data[entry_start],
             self.block.data[entry_start + 1],
         ]) as usize;
-        let key_start = entry_start + 2;
+        let key_len = u16::from_le_bytes([
+            self.block.data[entry_start + 2],
+            self.block.data[entry_start + 3],
+        ]) as usize;
+
+        let key_start = entry_start + 4;
         let key_end = key_start + key_len;
 
-        let key_bytes = &self.block.data[key_start..key_end];
-        self.key = KeyVec::from_vec(key_bytes.to_vec());
+        let key_remaining = &self.block.data[key_start..key_end];
+        self.key = {
+            let mut common_prefix = self.first_key.raw_ref()[..key_overlap_len].to_vec();
+            common_prefix.extend(key_remaining);
+            KeyVec::from_vec(common_prefix)
+        };
 
         // extract value range
         let val_len =

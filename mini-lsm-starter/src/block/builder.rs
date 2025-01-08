@@ -31,11 +31,6 @@ impl BlockBuilder {
     /// (does not add the key-value pair if false was returned).
     #[must_use]
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
-        // special handling for the first key for some reason..
-        if self.first_key.is_empty() {
-            self.first_key = key.to_key_vec();
-        }
-
         if !self.data.is_empty() && self.will_exceed_block_size(key, value) {
             return false; // indicate that the key-value pair was not added
         }
@@ -46,27 +41,39 @@ impl BlockBuilder {
         ----------------------------------------------------------------------------------------------------
         | Entry #1 | Entry #2 | ... | Entry #N | Offset #1 | Offset #2 | ... | Offset #N | num_of_elements |
         ----------------------------------------------------------------------------------------------------
+
+        ----------------------------------------------------------------------------------------------------------------
+        |                           Entry #1                                                                     | ... |
+        ----------------------------------------------------------------------------------------------------------------
+        | key_overlap_len (u16) | rest_key_len (u16) | key (rest_key_len)  | value_len (2B) | value (varlen)     | ... |
+        ----------------------------------------------------------------------------------------------------------------
          */
 
         self.offsets.push(self.data.len() as u16);
-        /*
-        -----------------------------------------------------------------------
-        |                           Entry #1                            | ... |
-        -----------------------------------------------------------------------
-        | key_len (2B) | key (keylen) | value_len (2B) | value (varlen) | ... |
-        -----------------------------------------------------------------------
-         */
 
-        // key_len (2B)
+        // works well for the first key too- overlap_len will be 0
+        let overlap_len = Self::get_overlap_len(&self.first_key, &key);
+        let rest_key_len = (key.len() - overlap_len) as u16;
+
+        // overlap_len (2B)
         self.data
-            .extend_from_slice(&(key.len() as u16).to_le_bytes());
-        // key
-        self.data.extend_from_slice(key.raw_ref());
+            .extend_from_slice(&(overlap_len as u16).to_le_bytes());
+
+        // rest_key_len (2B)
+        self.data.extend_from_slice(&rest_key_len.to_le_bytes());
+
+        // rest of the key
+        self.data.extend_from_slice(&key.raw_ref()[overlap_len..]);
+
         // value_len (2B)
         self.data
             .extend_from_slice(&(value.len() as u16).to_le_bytes());
         // value
         self.data.extend_from_slice(value);
+
+        if self.first_key.is_empty() {
+            self.first_key = key.to_key_vec();
+        }
 
         true // indicate that the key-value pair was added
     }
@@ -95,5 +102,14 @@ impl BlockBuilder {
 
     pub fn estimated_size(&self) -> usize {
         self.data.len()
+    }
+
+    fn get_overlap_len(first_key: &KeyVec, key: &KeySlice) -> usize {
+        first_key
+            .raw_ref()
+            .iter()
+            .zip(key.raw_ref())
+            .take_while(|(a, b)| a == b)
+            .count()
     }
 }
