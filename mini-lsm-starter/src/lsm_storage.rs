@@ -281,15 +281,64 @@ impl LsmStorageInner {
         compaction_filters.push(compaction_filter);
     }
 
+    fn handle_tombstone(value: Bytes) -> Option<Bytes> {
+        if value.is_empty() {
+            return None;
+        }
+        Some(value)
+    }
+
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        let iter = self.scan(Bound::Included(key), Bound::Included(key))?;
-        if iter.is_valid() && iter.key() == key {
-            // Return the value as a `Bytes`.
-            Ok(Some(Bytes::copy_from_slice(iter.value())))
-        } else {
-            Ok(None)
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
+
+        // the mutable memtable contains the most recent mutations
+        if let Some(value) = snapshot.memtable.get(key) {
+            return Ok(Self::handle_tombstone(value));
         }
+
+        // followed by the immutable memtables. Note that these are sorted with newest first
+        for memtable in snapshot.imm_memtables.iter() {
+            if let Some(value) = memtable.get(key) {
+                return Ok(Self::handle_tombstone(value));
+            }
+        }
+
+        // followed by the L0 SSTs. However remember that the SSTs while they too are sorted
+        // with the newest first, they don't let us directly access the key- only to iterator
+        // over them.
+        let l0_iters = snapshot
+            .l0_sstables
+            .iter()
+            .map(|sst_id| snapshot.sstables.get(sst_id).expect("sst_id is valid"))
+            .filter(|sst| {
+                range_overlap(
+                    Bound::Included(key),
+                    Bound::Included(key),
+                    sst.first_key().raw_ref(),
+                    sst.last_key().raw_ref(),
+                )
+            })
+            .filter(|sst| {
+                let Some(bloom) = sst.bloom.as_ref() else {
+                    return true;
+                };
+                bloom.may_contain(farmhash::fingerprint32(key))
+            })
+            .map(|sst| {
+                SsTableIterator::create_and_seek_to_key(Arc::clone(sst), KeySlice::from_slice(key))
+                    .map(Box::new)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let iter = MergeIterator::create(l0_iters);
+        if iter.is_valid() && iter.key().raw_ref() == key {
+            return Ok(Self::handle_tombstone(Bytes::copy_from_slice(iter.value())));
+        }
+        Ok(None)
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.

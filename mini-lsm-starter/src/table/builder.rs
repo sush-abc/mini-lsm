@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use bytes::Bytes;
 
-use super::{BlockMeta, FileObject, SsTable};
+use super::{bloom::Bloom, BlockMeta, FileObject, SsTable};
 use crate::{
     block::BlockBuilder,
     key::{KeyBytes, KeySlice},
@@ -18,9 +18,12 @@ pub struct SsTableBuilder {
     first_key: Vec<u8>,
     last_key: Vec<u8>,
     data: Vec<u8>,
+    key_hashes: Vec<u32>,
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
 }
+
+const FPR: f64 = 0.01;
 
 impl SsTableBuilder {
     /// Create a builder based on target block size.
@@ -37,6 +40,8 @@ impl SsTableBuilder {
         if self.first_key.is_empty() {
             self.first_key = key.to_key_vec().into_inner();
         }
+
+        self.key_hashes.push(farmhash::fingerprint32(key.raw_ref()));
 
         if self.builder.add(key, value) {
             self.last_key = key.to_key_vec().into_inner();
@@ -79,11 +84,26 @@ impl SsTableBuilder {
 
         self.finish_block();
 
+        /*
+        -----------------------------------------------------------------------------------------------------
+        |         Block Section         |                            Meta Section                           |
+        -----------------------------------------------------------------------------------------------------
+        | data block | ... | data block | metadata | meta block offset | bloom filter | bloom filter offset |
+        |                               |  varlen  |         u32       |    varlen    |        u32          |
+        -----------------------------------------------------------------------------------------------------
+         */
+
+        let bloom = self.create_bloom_filter();
+
         let mut buf = self.data;
         let meta_offset = buf.len();
         BlockMeta::encode_block_meta(&self.meta, &mut buf);
-
         buf.put_u32(meta_offset as u32);
+
+        let bloom_offset = buf.len();
+        bloom.encode(&mut buf);
+        buf.put_u32(bloom_offset as u32);
+
         let file = FileObject::create(path.as_ref(), buf)?;
         Ok(SsTable {
             id,
@@ -93,9 +113,16 @@ impl SsTableBuilder {
             block_meta: self.meta,
             block_meta_offset: meta_offset,
             block_cache,
-            bloom: None,
+            bloom: Some(bloom),
             max_ts: 0,
         })
+    }
+
+    fn create_bloom_filter(&self) -> Bloom {
+        assert!(!self.key_hashes.is_empty());
+
+        let bits_per_key = Bloom::bloom_bits_per_key(self.key_hashes.len(), FPR);
+        Bloom::build_from_key_hashes(&self.key_hashes, bits_per_key)
     }
 
     #[cfg(test)]
