@@ -94,7 +94,7 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
             if iter.1.key() == Key::from_slice(&prev_key) {
                 // we just returned this key, skip it
                 // as we returned the more recent value
-                // from the memtable with the smaller idx
+                // from the iterator with the smaller idx
                 iter.1.next()?;
                 if iter.1.is_valid() {
                     self.iters.push(iter);

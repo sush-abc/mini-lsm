@@ -88,6 +88,7 @@ impl SsTableIterator {
         while lo < hi {
             let mi = lo + (hi - lo) / 2;
             let mi_blk_meta = &table.block_meta[mi];
+            #[allow(clippy::nonminimal_bool)]
             if !(target <= mi_blk_meta.last_key.as_key_slice()) {
                 lo = mi + 1;
             } else {

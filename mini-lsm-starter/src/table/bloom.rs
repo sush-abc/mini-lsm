@@ -81,6 +81,7 @@ impl Bloom {
 
         for h in keys_hashes {
             let mut h = *h;
+            #[allow(clippy::manual_rotate)]
             let delta = (h >> 17) | (h << 15);
             for _ in 0..k {
                 let bit_pos = (h as usize) % nbits;
@@ -102,6 +103,7 @@ impl Bloom {
             true
         } else {
             let nbits = self.filter.bit_len();
+            #[allow(clippy::manual_rotate)]
             let delta = (h >> 17) | (h << 15);
             for _ in 0..self.k {
                 let bit_pos = h % (nbits as u32);

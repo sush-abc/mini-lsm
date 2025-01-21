@@ -15,6 +15,7 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
@@ -310,6 +311,10 @@ impl LsmStorageInner {
         // followed by the L0 SSTs. However remember that the SSTs while they too are sorted
         // with the newest first, they don't let us directly access the key- only to iterator
         // over them.
+
+        // remember that L0 SSTs just contain the most recent uptates. Let's see if
+        // the key is in the L0 SSTs. If not we'll need to check the L1 SSTs next.
+        // Remember that all the L0 SSTs and L1 SSTs are merged into L1 SSTs periodically.
         let l0_iters = snapshot
             .l0_sstables
             .iter()
@@ -338,6 +343,34 @@ impl LsmStorageInner {
         if iter.is_valid() && iter.key().raw_ref() == key {
             return Ok(Self::handle_tombstone(Bytes::copy_from_slice(iter.value())));
         }
+
+        // Finally, we'll check the L1 SSTs.
+
+        let l1_iters = snapshot.levels[0]
+            .1
+            .iter()
+            .map(|sst_id| snapshot.sstables.get(sst_id).expect("sst_id is valid"))
+            .filter(|sst| {
+                range_overlap(
+                    Bound::Included(key),
+                    Bound::Included(key),
+                    sst.first_key().raw_ref(),
+                    sst.last_key().raw_ref(),
+                )
+            })
+            .map(|sst| {
+                SsTableIterator::create_and_seek_to_key(Arc::clone(sst), KeySlice::from_slice(key))
+                    .map(Box::new)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Exactly one L1 SST may contain the key
+        assert!(l1_iters.len() <= 1);
+        let iter = MergeIterator::create(l1_iters);
+        if iter.is_valid() && iter.key().raw_ref() == key {
+            return Ok(Self::handle_tombstone(Bytes::copy_from_slice(iter.value())));
+        }
+
         Ok(None)
     }
 
@@ -440,7 +473,7 @@ impl LsmStorageInner {
             let Some(oldest) = state.imm_memtables.last() else {
                 return Ok(());
             };
-            Arc::clone(&oldest)
+            Arc::clone(oldest)
         };
 
         // the expensive io
@@ -499,7 +532,7 @@ impl LsmStorageInner {
             MergeIterator::create(memtable_iters)
         };
 
-        let sst_iter = {
+        let l0_ssts_iter = {
             let sst_iters = snapshot
                 .l0_sstables
                 .iter()
@@ -539,8 +572,34 @@ impl LsmStorageInner {
             MergeIterator::create(sst_iters)
         };
 
+        let l1_ssts_iter = {
+            let l1_ssts = snapshot.levels[0]
+                .1
+                .iter()
+                .map(|sst_id| snapshot.sstables.get(sst_id).unwrap().clone())
+                .collect::<Vec<_>>();
+            match lower {
+                Bound::Included(key) => {
+                    SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(key))?
+                }
+                Bound::Excluded(key) => {
+                    let mut iter = SstConcatIterator::create_and_seek_to_key(
+                        l1_ssts,
+                        KeySlice::from_slice(key),
+                    )?;
+                    if iter.is_valid() && iter.key().raw_ref() == key {
+                        iter.next()?;
+                    }
+                    iter
+                }
+                Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(l1_ssts)?,
+            }
+        };
+
+        let memtable_and_l0_iter = TwoMergeIterator::create(memtable_iter, l0_ssts_iter)?;
+
         Ok(FusedIterator::new(LsmIterator::new(
-            TwoMergeIterator::create(memtable_iter, sst_iter)?,
+            TwoMergeIterator::create(memtable_and_l0_iter, l1_ssts_iter)?,
             match upper {
                 Bound::Included(key) => Bound::Included(Bytes::copy_from_slice(key)),
                 Bound::Excluded(key) => Bound::Excluded(Bytes::copy_from_slice(key)),
