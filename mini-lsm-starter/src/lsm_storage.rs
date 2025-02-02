@@ -51,10 +51,10 @@ pub enum WriteBatchRecord<T: AsRef<[u8]>> {
 
 impl LsmStorageState {
     fn create(options: &LsmStorageOptions) -> Self {
-        let levels = match &options.compaction_options {
+        let levels = match options.compaction_options {
             CompactionOptions::Leveled(LeveledCompactionOptions { max_levels, .. })
             | CompactionOptions::Simple(SimpleLeveledCompactionOptions { max_levels, .. }) => (1
-                ..=*max_levels)
+                ..=max_levels)
                 .map(|level| (level, Vec::new()))
                 .collect::<Vec<_>>(),
             CompactionOptions::Tiered(_) => Vec::new(),
@@ -165,11 +165,17 @@ impl MiniLsm {
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
     /// not exist.
     pub fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Arc<Self>> {
+        if !path.as_ref().exists() {
+            println!("Creating directory {:?}", path.as_ref());
+            std::fs::create_dir_all(path.as_ref())?;
+        }
+
         let inner = Arc::new(LsmStorageInner::open(path, options)?);
         let (tx1, rx) = crossbeam_channel::unbounded();
         let compaction_thread = inner.spawn_compaction_thread(rx)?;
         let (tx2, rx) = crossbeam_channel::unbounded();
         let flush_thread = inner.spawn_flush_thread(rx)?;
+
         Ok(Arc::new(Self {
             inner,
             flush_notifier: tx2,
@@ -313,8 +319,11 @@ impl LsmStorageInner {
         // over them.
 
         // remember that L0 SSTs just contain the most recent uptates. Let's see if
-        // the key is in the L0 SSTs. If not we'll need to check the L1 SSTs next.
-        // Remember that all the L0 SSTs and L1 SSTs are merged into L1 SSTs periodically.
+        // the key is in the L0 SSTs. If not we'll need to check the L1 SSTs, and L2 SSTs next,
+        // and so on. Remember that these are compacted periodically.
+
+        // Also remember that L0 ssts may contain the same keys- which is not true
+        // for L1 and above. So, we'll need to treat L0 specially first.
         let l0_iters = snapshot
             .l0_sstables
             .iter()
@@ -338,39 +347,47 @@ impl LsmStorageInner {
                     .map(Box::new)
             })
             .collect::<Result<Vec<_>>>()?;
-
+        
+        // remember- any sst might contain this key, we need to fetch the newst
         let iter = MergeIterator::create(l0_iters);
         if iter.is_valid() && iter.key().raw_ref() == key {
             return Ok(Self::handle_tombstone(Bytes::copy_from_slice(iter.value())));
         }
 
-        // Finally, we'll check the L1 SSTs.
-
-        let l1_iters = snapshot.levels[0]
-            .1
-            .iter()
-            .map(|sst_id| snapshot.sstables.get(sst_id).expect("sst_id is valid"))
-            .filter(|sst| {
-                range_overlap(
-                    Bound::Included(key),
-                    Bound::Included(key),
-                    sst.first_key().raw_ref(),
-                    sst.last_key().raw_ref(),
-                )
-            })
-            .map(|sst| {
-                SsTableIterator::create_and_seek_to_key(Arc::clone(sst), KeySlice::from_slice(key))
-                    .map(Box::new)
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        // Exactly one L1 SST may contain the key
-        assert!(l1_iters.len() <= 1);
-        let iter = MergeIterator::create(l1_iters);
-        if iter.is_valid() && iter.key().raw_ref() == key {
-            return Ok(Self::handle_tombstone(Bytes::copy_from_slice(iter.value())));
+        // Finally, we'll check each of the levels.
+        for level in &snapshot.levels {
+            let sst_iter = level
+                .1
+                .iter()
+                .map(|sst_id| snapshot.sstables.get(sst_id).expect("sst_id is valid"))
+                .find(|sst| {
+                    range_overlap(
+                        Bound::Included(key),
+                        Bound::Included(key),
+                        sst.first_key().raw_ref(),
+                        sst.last_key().raw_ref(),
+                    )
+                })
+                .map(|sst| {
+                    SsTableIterator::create_and_seek_to_key(
+                        Arc::clone(sst),
+                        KeySlice::from_slice(key),
+                    )
+                });
+            let Some(sst_iter) = sst_iter else {
+                // no ssts at this level may contain this key
+                continue;
+            };
+            // any errors with opening sst shortcircut our logic
+            let sst_iter = sst_iter?;
+            // finally, an sst looks like it might contain our key- does it
+            // actually?
+            if sst_iter.is_valid() && iter.key().raw_ref() == key {
+                return Ok(Self::handle_tombstone(Bytes::copy_from_slice(iter.value())));
+            }
         }
 
+        // none of the levels contained the key
         Ok(None)
     }
 
@@ -385,12 +402,13 @@ impl LsmStorageInner {
     }
 
     fn _put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let state = self.state.read();
-        state.memtable.put(key, value)?;
-        let size = state.memtable.approximate_size();
-        drop(state);
-
-        self.try_freeze(size)?;
+        let estimated_size;
+        {
+            let state = self.state.read();
+            state.memtable.put(key, value)?;
+            estimated_size = state.memtable.approximate_size();
+        }
+        self.try_freeze(estimated_size)?;
         Ok(())
     }
 
@@ -571,20 +589,21 @@ impl LsmStorageInner {
                 .collect::<Result<Vec<_>, _>>()?;
             MergeIterator::create(sst_iters)
         };
+        let memtable_and_l0_iter = TwoMergeIterator::create(memtable_iter, l0_ssts_iter)?;
 
-        let l1_ssts_iter = {
-            let l1_ssts = snapshot.levels[0]
-                .1
+        let mut l1_to_n_concat_iters = Vec::with_capacity(snapshot.levels.len());
+        for (_level, ssts) in snapshot.levels.iter() {
+            let ssts = ssts
                 .iter()
                 .map(|sst_id| snapshot.sstables.get(sst_id).unwrap().clone())
                 .collect::<Vec<_>>();
-            match lower {
+            let concat_iter = match lower {
                 Bound::Included(key) => {
-                    SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(key))?
+                    SstConcatIterator::create_and_seek_to_key(ssts, KeySlice::from_slice(key))?
                 }
                 Bound::Excluded(key) => {
                     let mut iter = SstConcatIterator::create_and_seek_to_key(
-                        l1_ssts,
+                        ssts,
                         KeySlice::from_slice(key),
                     )?;
                     if iter.is_valid() && iter.key().raw_ref() == key {
@@ -592,14 +611,13 @@ impl LsmStorageInner {
                     }
                     iter
                 }
-                Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(l1_ssts)?,
-            }
-        };
-
-        let memtable_and_l0_iter = TwoMergeIterator::create(memtable_iter, l0_ssts_iter)?;
-
+                Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(ssts)?,
+            };
+            l1_to_n_concat_iters.push(Box::new(concat_iter));   
+        }
+        let lvl1_to_n_merge_iter = MergeIterator::create(l1_to_n_concat_iters);
         Ok(FusedIterator::new(LsmIterator::new(
-            TwoMergeIterator::create(memtable_and_l0_iter, l1_ssts_iter)?,
+            TwoMergeIterator::create(memtable_and_l0_iter, lvl1_to_n_merge_iter)?,
             match upper {
                 Bound::Included(key) => Bound::Included(Bytes::copy_from_slice(key)),
                 Bound::Excluded(key) => Bound::Excluded(Bytes::copy_from_slice(key)),

@@ -45,15 +45,17 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        let mut heap = BinaryHeap::new();
-
-        // Push all valid iterators into the heap
-        for (i, iter) in iters.into_iter().enumerate() {
-            if iter.is_valid() {
-                heap.push(HeapWrapper(i, iter));
-            }
-        }
-
+        
+        let valid_heap_elements = iters
+            .into_iter()
+            .enumerate()
+            // remove invalide iters first
+            .filter(|(_i, iter)| iter.is_valid())
+            // construct the heap item
+            .map(|(i, iter)| HeapWrapper(i, iter));
+        
+        // construct heap next- this makes this operation O(n)
+        let mut heap = BinaryHeap::from_iter(valid_heap_elements);
         // Pop the smallest key to become our current
         let current = heap.pop();
         Self {
